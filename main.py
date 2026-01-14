@@ -658,7 +658,7 @@ def put_buttons(files, key=None) -> None:
         if file["type"] in ("file_path", "file_citation") :
             # Assistant APIでは"file_path"だけで足りた模様
             st.download_button(
-                f"{file["index"]}: {file["filename"]} : ダウンロード",
+                f"{file['index']}: {file['filename']} : ダウンロード",
                 get_file(file["file_id"]),
                 file_name=file["filename"],
                 key=key
@@ -867,27 +867,27 @@ def function_calling(fname, fargs):
                 timezone=fargs.get("timezone")
             )
         elif fname == "get_google_serper":
-            st.toast(f"[Google Serper] {fargs.get("query")}", icon="🔍");
+            st.toast(f"[Google Serper] {fargs.get('query')}", icon="🔍");
             fresponse = serperTools.get_google_serper(
                 query=fargs.get("query")
             )
         elif fname == "get_google_results":
-            st.toast(f"[Google detail] {fargs.get("query")}", icon="🔍");
+            st.toast(f"[Google detail] {fargs.get('query')}", icon="🔍");
             fresponse = serperTools.get_google_results(
                 query=fargs.get("query")
             )
         elif fname == "get_google_scholar":
-            st.toast(f"[Google scholar] {fargs.get("query")}", icon="🎓");
+            st.toast(f"[Google scholar] {fargs.get('query')}", icon="🎓");
             fresponse = serperTools.get_google_scholar(
                 query=fargs.get("query")
             )
         elif fname == "get_google_news":
-            st.toast(f"[Google news] {fargs.get("query")}", icon="📰");
+            st.toast(f"[Google news] {fargs.get('query')}", icon="📰");
             fresponse = serperTools.get_google_news(
                 query=fargs.get("query")
             )
         elif fname == "get_google_places":
-            st.toast(f"[Google places] {fargs.get("query")}", icon="🍽️");
+            st.toast(f"[Google places] {fargs.get('query')}", icon="🍽️");
             fresponse = serperTools.get_google_places(
                 query=fargs.get("query"),
                 country=fargs.get("country", "jp"),
@@ -1268,8 +1268,8 @@ def format_token_summary(usage):
     if reduce(
         lambda a, c:c in usage and a,
         ["completion_tokens", "prompt_tokens", "total_tokens", "cost"], True):
-        token_summary = f"tokens in:{usage["prompt_tokens"]} out:{usage["completion_tokens"]} total:{usage["total_tokens"]}"
-        token_summary += f" cost: US${usage["cost"]}"
+        token_summary = f"tokens in:{usage['prompt_tokens']} out:{usage['completion_tokens']} total:{usage['total_tokens']}"
+        token_summary += f" cost: US${usage['cost']}"
         token_summary = f"\n:violet-background[{token_summary}]"
 
     return token_summary 
@@ -1438,6 +1438,71 @@ if "assistants" not in st.session_state:
     }
 
 models = {
+  "GPT-5.2-response": {
+    "model": "gpt-5.2",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 1.75, "cached": 0.175, "out":14} #https://azure.microsoft.com/en-us/blog/introducing-gpt-5-2-in-microsoft-foundry-the-new-standard-for-enterprise-ai/
+  },
+  "GPT-5.2-chat-response": {
+    "model": "gpt-5.2-chat",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 1.75, "cached": 0.175, "out":14}
+  },
+  "model-router-completion": {
+    "model": "model-router",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "completion",
+    "support_vision": True,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.125, "out":10} # これはGPT-5の単価。実際には利用されたモデルの単価で請求される
+  },
+  "GPT-5.1-response": {
+    "model": "gpt-5.1",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.13, "out":10}
+  },
+  "GPT-5.1-chat-response": {
+    "model": "gpt-5.1-chat",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.13, "out":10}
+  },
+  "GPT-5.1-codex-max-response": {
+    "model": "gpt-5.1-codex-max",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_code_interpreter": False,
+    "support_reasoning_effort": ["low", "medium", "high", "xhigh"],
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.13, "out":10}
+  },
   "GPT-5-mini-response": {
     "model": "gpt-5-mini",
     "client": st.session_state.clients["openai"],
@@ -1460,15 +1525,6 @@ models = {
     "streaming": True,
     "pricing": {"in": 1.25, "cached": 0.125, "out":10} # Azureでのpriceが見つからない。これは、https://learn.microsoft.com/en-us/answers/questions/5521675/what-is-internal-microsoft-pricing-for-using-gpt-5
   },
-  "model-router-completion": {
-    "model": "model-router",
-    "client": st.session_state.clients["openai"],
-    "api_mode": "completion",
-    "support_vision": True,
-    "support_tools": True,
-    "streaming": True,
-    "pricing": {"in": 1.25, "cached": 0.125, "out":10} # これはGPT-5の単価。実際には利用されたモデルの単価で請求される
-  },
   "GPT-4.1-response": {
     "model": "gpt-4.1",
     "client": st.session_state.clients["openai"],
@@ -1484,7 +1540,7 @@ models = {
     "api_mode": "completion",
     "support_vision": True,
     "support_tools": True,
-    "support_reasoning_effort": True,
+    "support_reasoning_effort": ["low", "medium", "high"],
     "streaming": False,
     "pricing": {"in": 15, "out":60}
   },
@@ -1503,7 +1559,7 @@ models = {
     "api_mode": "completion",
     "support_vision": True,
     "support_tools": True,
-    "support_reasoning_effort": True,
+    "support_reasoning_effort": ["low", "medium", "high"],
     "streaming": True,
     "pricing": {"in": 10, "out":40} # Azureでのpriceが見つからない。これはOpen AIのもの。
   },
@@ -1513,7 +1569,7 @@ models = {
     "api_mode": "completion",
     "support_vision": False,
     "support_tools": True,
-    "support_reasoning_effort": True,
+    "support_reasoning_effort": ["low", "medium", "high"],
     "streaming": True,
     "pricing": {"in": 1.1, "out":4.4}
   },
@@ -1523,7 +1579,7 @@ models = {
     "api_mode": "completion",
     "support_vision": True,
     "support_tools": True,
-    "support_reasoning_effort": True,
+    "support_reasoning_effort": ["low", "medium", "high"],
     "streaming": True,
     "pricing": {"in": 1.1, "out":4.4} # Azureでのpriceが見つからない。これはOpen AIのもの。
   },
@@ -1625,7 +1681,10 @@ with st.sidebar:
     st.text("Support vision: " + ("True" if model.get("support_vision", False) else "False"))
 
     if model.get("support_reasoning_effort", False):
-        reasoning_effort_choices = ["minimal", "low", "medium", "high"]
+        if isinstance(model["support_reasoning_effort"], list):
+            reasoning_effort_choices = model["support_reasoning_effort"]
+        else:
+            reasoning_effort_choices = ["minimal", "low", "medium", "high"]
         options["reasoning_effort"] = st.selectbox(
             "reasoning_effort",
             reasoning_effort_choices,
@@ -1662,17 +1721,21 @@ with st.sidebar:
         )
 
     if model["api_mode"] == "assistant":
-        tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter", "file_search"]]
+        supported_tool_types = ["function", "code_interpreter", "file_search"]
     elif model["api_mode"] == "response":
-        tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter", "image_generation"]
+        supported_tool_types = ["function", "code_interpreter", "image_generation"]
 # web_search_previewは現在実装されておらず、file_searchを有効化するにはvector storeの管理機能が必要
 #        tools = [tool for tool in tools if tool.get("type", None) in ["function", "web_search_preview", "file_search"]
 # web_search_previewが使えるようになれば、これらのツールは不要になる
         #            and (tool.get("type", None) != "function" or tool["function"]["name"] not in ["get_google_results", "parse_html_content", "extract_pdf_content"])
-            ]
     else:
         # "completion", "inference"で使えるのはfunctionだけ
-        tools = [tool for tool in tools if tool.get("type", None) == "function"]
+        supported_tool_types = ["function"]
+
+    tools = [tool for tool in tools if tool.get("type", None) in supported_tool_types]
+
+    if model.get("support_code_interpreter", True) == False:
+        tools = [tool for tool in tools if tool.get("type", None) != "code_interpreter"]
 
     # 表示用ラベル生成
     tool_names = [
