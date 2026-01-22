@@ -1184,6 +1184,9 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
                 if hasattr(response_message, "tool_calls") and response_message.tool_calls:
                     messages += handle_tool_calls(response_message.tool_calls, "completion")
                     tool_call_count += 1
+                    # DeepSeek V3.2がtool_choice="auto"では上手くtool call出来ないことに対する応急処置
+                    # tool_choice = "required"のままだと無限ループになってしまうので1回だけで"auto"に戻す。
+                    args["tool_choice"] = "auto"
 
                 else:
                     break
@@ -1422,6 +1425,11 @@ if "clients" not in st.session_state:
             default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-1"},
             timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
+        "services_openaiv1": OpenAI(
+            base_url = os.getenv("SERVICES_AI_AZURE_ENDPOINT_URL").rstrip("/") + "/openai/v1/",
+            api_key=os.getenv("SERVICES_AI_AZURE_CREDENTIAL"),
+            timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
+        ),
         "deepseek": ChatCompletionsClient(
             endpoint=os.getenv("DEEPSEEK_ENDPOINT_URL"),
             credential=AzureKeyCredential(os.getenv("DEEPSEEK_AZURE_INFERENCE_CREDENTIAL"))
@@ -1468,6 +1476,24 @@ models = {
     "support_tools": True,
     "streaming": True,
     "pricing": {"in": 1.25, "cached": 0.125, "out":10} # これはGPT-5の単価。実際には利用されたモデルの単価で請求される
+  },
+  "DeepSeek-V3.2": {
+    "model": "DeepSeek-V3.2",
+    "client": st.session_state.clients["services_openaiv1"],
+    "api_mode": "completion",
+    "support_vision": False,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 0.58, "cached": 1.68, "out":1.68} # cachedの値はない
+  },
+  "DeepSeek-V3.2-Speciale": {
+    "model": "DeepSeek-V3.2-Speciale",
+    "client": st.session_state.clients["openaiv1"],
+    "api_mode": "completion",
+    "support_vision": False,
+    "support_tools": False,
+    "streaming": True,
+    "pricing": {"in": 0.58, "cached": 1.68, "out":1.68} # cachedの値はない
   },
   "GPT-5.1-response": {
     "model": "gpt-5.1",
@@ -1764,7 +1790,16 @@ with st.sidebar:
             if st.session_state.switches[tool_names[i]]
         ]
     else:
+        switches = {}
         selected_tools = []
+
+    # DeepSeek V3.2がtool_choice="auto"では上手くtool call出来ないことに対する応急処置
+    if model["model"] == "DeepSeek-V3.2" and model["api_mode"] == "completion" and model.get("support_tools", False) and st.toggle(
+            "tool_choice required",
+            value=True,
+            key="tool_choice"
+        ):
+        options["tool_choice"] = "required"
 
     st.header("表示設定")
     if model["streaming"] and not switches.get("image_generation", False):
