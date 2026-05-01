@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+<script>
+(function () {
+  const LOG_PREFIX = "[session-storage-component]";
+  let lastValueJson = null;
+
+  function log(message, data) {
+    const ts = new Date().toISOString();
+    if (typeof data === "undefined") {
+      console.log(LOG_PREFIX, ts, message);
+    } else {
+      console.log(LOG_PREFIX, ts, message, data);
+    }
+  }
+
+  function sendMessageToStreamlitClient(type, data) {
+    const outData = Object.assign({
+      isStreamlitMessage: true,
+      type: type,
+    }, data);
+    log("postMessage -> streamlit", { type: type, data: data });
+    window.parent.postMessage(outData, "*");
+  }
+
+  function init() {
+    log("init");
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+  }
+
+  function setFrameHeight(height) {
+    log("setFrameHeight", { height: height });
+    sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+  }
+
+  function setComponentValue(value) {
+    let valueJson = null;
+    try {
+      valueJson = JSON.stringify(value);
+    } catch (_) {
+      valueJson = null;
+    }
+
+    if (valueJson && valueJson === lastValueJson) {
+      return;
+    }
+
+    lastValueJson = valueJson;
+    log("setComponentValue", value);
+    sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value });
+  }
+
+  function isQuotaError(e) {
+    return e && (
+      e.name === "QuotaExceededError" ||
+      e.code === 22 ||
+      e.code === 1014
+    );
+  }
+
+  function trimMessages(obj, trimStepBytes) {
+    if (!obj || !obj.conversation || !Array.isArray(obj.conversation.messages)) {
+      log("trim skipped: conversation.messages not found");
+      return 0;
+    }
+
+    const messages = obj.conversation.messages;
+    let removed = 0;
+    let removedBytes = 0;
+
+    while (messages.length > 1 && removedBytes < trimStepBytes) {
+      const msg = messages.shift();
+      removed += 1;
+      try {
+        removedBytes += JSON.stringify(msg).length;
+      } catch (_) {
+        removedBytes += 1024;
+      }
+    }
+
+    obj.trimmed_messages = (obj.trimmed_messages || 0) + removed;
+    log("trim applied", {
+      removed_messages: removed,
+      removed_bytes_estimate: removedBytes,
+      remaining_messages: messages.length
+    });
+    return removed;
+  }
+
+  function saveWithTrim(storageKey, payloadJson, trimStepBytes) {
+    let obj;
+    try {
+      obj = JSON.parse(payloadJson || "{}");
+    } catch (e) {
+      log("save failed: invalid payload", { error: String(e) });
+      return { ok: false, status: "invalid_payload", error: String(e) };
+    }
+
+    while (true) {
+      const raw = JSON.stringify(obj);
+      try {
+        sessionStorage.setItem(storageKey, raw);
+        log("save success", {
+          storage_key: storageKey,
+          bytes: raw.length,
+          trimmed_messages: obj.trimmed_messages || 0
+        });
+        return {
+          ok: true,
+          status: obj.trimmed_messages ? "saved_trimmed" : "saved",
+          bytes: raw.length,
+          trimmed_messages: obj.trimmed_messages || 0,
+        };
+      } catch (e) {
+        if (!isQuotaError(e)) {
+          log("save failed: non quota error", { error: String(e) });
+          return { ok: false, status: "save_error", error: String(e) };
+        }
+
+        log("quota exceeded, trimming", { storage_key: storageKey, trim_step_bytes: Number(trimStepBytes) || 102400 });
+        const removed = trimMessages(obj, Number(trimStepBytes) || 102400);
+        if (removed <= 0) {
+          log("save failed: quota exceeded and cannot trim");
+          return { ok: false, status: "quota_exceeded", error: String(e) };
+        }
+      }
+    }
+  }
+
+  function onRender(event) {
+    if (!event.data || event.data.type !== "streamlit:render") {
+      return;
+    }
+
+    const args = event.data.args || {};
+    const mode = args.mode;
+    if (mode === "idle") {
+      return;
+    }
+
+    log("render event", {
+      mode: mode,
+      storage_key: args.storage_key,
+      has_payload_json: Boolean(args.payload_json),
+      trim_step_bytes: args.trim_step_bytes
+    });
+    const storageKey = args.storage_key;
+    const trimStepBytes = args.trim_step_bytes;
+
+    let result = { ok: false, status: "unknown_mode" };
+
+    try {
+      if (mode === "load") {
+        const payload = sessionStorage.getItem(storageKey);
+        log("load", { storage_key: storageKey, found: Boolean(payload), bytes: payload ? payload.length : 0 });
+        result = payload
+          ? { ok: true, status: "loaded", found: true, payload_json: payload }
+          : { ok: true, status: "empty", found: false };
+      } else if (mode === "save") {
+        result = saveWithTrim(storageKey, args.payload_json || "{}", trimStepBytes);
+      } else if (mode === "clear") {
+        sessionStorage.removeItem(storageKey);
+        log("clear", { storage_key: storageKey });
+        result = { ok: true, status: "cleared" };
+      }
+    } catch (e) {
+      log("mode handling failed", { mode: mode, error: String(e) });
+      result = { ok: false, status: "error", error: String(e) };
+    }
+
+    setComponentValue(result);
+  }
+
+  window.addEventListener("message", onRender);
+  init();
+  setFrameHeight(0);
+})();
+</script>
+</body>
+</html>

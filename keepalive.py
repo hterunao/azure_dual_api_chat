@@ -268,5 +268,4 @@ def login_state_extender(email):
 </body>
 </html>
 """
-    components.html(html, height=80)  # height 0 で見た目に影響させない
-
+    components.html(html, height=80)
