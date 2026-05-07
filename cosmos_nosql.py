@@ -19,7 +19,7 @@ from datetime import datetime, date, timezone, timedelta
 
 class CosmosDB:
     def __init__(self, host, key, database_id, container_id):
-        self.client = cosmos_client.CosmosClient(host, {'masterKey': key}, user_agent="CosmosDBPythonQuickstart", user_agent_overwrite=True)
+        self.client = cosmos_client.CosmosClient(host, {'masterKey': key}, user_agent="CosmosDBPythonQuickstart")
         # setup database for this sample
         try:
             self.db = self.client.create_database(id=database_id)
