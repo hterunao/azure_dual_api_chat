@@ -64,23 +64,65 @@ jobs:
             echo "ff_done=false" >> "$GITHUB_OUTPUT"
           fi
         continue-on-error: true
-
-      - name: If not FF, do a regular merge
+        
+      - name: If not FF, merge while keeping protected path from child
         if: steps.ff.outputs.ff_done == 'false'
         run: |
+          set +e
+          git merge --no-edit --no-commit "upstream/${{ matrix.upstream }}"
+          MERGE_STATUS=$?
           set -e
-          git merge --no-edit "upstream/${{ matrix.upstream }}"
 
-      - name: Restore protected path from previous commit
+          OLD="${{ steps.save_old.outputs.hash }}"
+
+          # マージ結果に含まれる .github を一旦 index / working tree から除去する
+          git rm -r -f --cached --ignore-unmatch -- "$PROTECTED_PATH" || true
+          rm -rf "$PROTECTED_PATH"
+
+          # .github をマージ前の子リポジトリ側の状態に戻す
+          if git cat-file -e "$OLD:$PROTECTED_PATH" 2>/dev/null; then
+            git checkout "$OLD" -- "$PROTECTED_PATH"
+          fi
+
+          git add -A -- "$PROTECTED_PATH" 2>/dev/null || true
+
+          # .github 以外に未解決コンフリクトが残っていたら失敗させる
+          UNRESOLVED="$(git diff --name-only --diff-filter=U)"
+
+          if [ -n "$UNRESOLVED" ]; then
+            echo "::error::Conflicts remain outside $PROTECTED_PATH:"
+            echo "$UNRESOLVED"
+            git merge --abort || true
+            exit 1
+          fi
+
+          # merge commit を作成
+          if [ -f .git/MERGE_HEAD ]; then
+            git commit --no-edit
+          elif [ "$MERGE_STATUS" -ne 0 ]; then
+            exit "$MERGE_STATUS"
+          fi
+
+      - name: Restore protected path after fast-forward
+        if: steps.ff.outputs.ff_done == 'true'
         run: |
           set -e
           OLD="${{ steps.save_old.outputs.hash }}"
-          git restore --source "$OLD" -- $PROTECTED_PATH || true
-          if ! git diff --quiet -- $PROTECTED_PATH; then
-            git add $PROTECTED_PATH
-            git commit -m "Restore $PROTECTED_PATH after upstream sync (${{ matrix.local }})"
+
+          # fast-forward の場合も upstream 側の .github が入る可能性があるため戻す
+          git rm -r -f --cached --ignore-unmatch -- "$PROTECTED_PATH" || true
+          rm -rf "$PROTECTED_PATH"
+
+          if git cat-file -e "$OLD:$PROTECTED_PATH" 2>/dev/null; then
+            git checkout "$OLD" -- "$PROTECTED_PATH"
           fi
 
+          git add -A -- "$PROTECTED_PATH" 2>/dev/null || true
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Restore $PROTECTED_PATH after upstream sync (${{ matrix.local }})"
+          fi
+          
       - name: Push changes
         run: |
           set -e
