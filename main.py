@@ -14,13 +14,12 @@ import base64
 import re
 import copy
 from functools import reduce
-from mimetypes import guess_type
 import httpx
 from openai import AssistantEventHandler, AzureOpenAI, OpenAI
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
 from typing_extensions import override
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, List, Tuple, Dict, Optional, Union
 from openai.types.file_object import FileObject
 from openai.types.chat import (
@@ -55,6 +54,8 @@ import internetAccess
 import processPDF
 from cosmos_nosql import CosmosDB
 from keepalive import login_state_extender
+from conversation_state import ChatMessage, ConversationManager
+from session_snapshot import queue_snapshot_save, run_snapshot_bridge
 
 ContentBlock = ImageFileContentBlock | ImageURLContentBlock | TextContentBlock | ResponseCodeInterpreterToolCall
 
@@ -189,276 +190,6 @@ class StreamHandler(AssistantEventHandler):
         self.final_run = stream.final_run or stream.current_run
         self.content += stream.content
 
-
-# メッセージクラスの定義
-@dataclass
-class ChatMessage:
-    role: str
-    # contentはAssistant APIのcontent定義を借用
-    content: List[ContentBlock]
-    files: List[str] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
-
-# スレッド管理クラス
-class ChatThread:
-    def __init__(self, client):
-        self.client = client
-        self.messages = []
-        self.thread_id = None
-
-    def add_message(self, model, role, content, files=None, metadata={}):
-        """メッセージを追加"""
-        if isinstance(content, str):
-            content = [TextContentBlock(type="text", text=Text(value=content, annotations=[]))]
-
-        self.messages.append(ChatMessage(role, content, files, metadata))
-
-        # gpt-4oのAssistant APIで画像認識が出来ない問題はとりあえずペンディングとする
-        # Assistant APIはImageURLContentBlockを認識しない？するはずだが・・
-
-        # Assistant APIを未使用の段階ではthread_idは存在しない。初めて使う時に作成して過去のメッセージを登録する。
-        # Assistant API時にはレスポンスは自動的にThreadに記録される。
-        if self.thread_id and (model["api_mode"] != "assistant" or role != "assistant"):
-            self.client.beta.threads.messages.create(
-                thread_id = self.thread_id,
-                role = role,
-                content = self.content_to_content_param(content),
-                attachments = files
-            )
-
-    def get_last_message(self):
-        return self.messages[-1]
-
-    def get_last_message_id(self):
-        """現在記録されている最後のメッセージのidを返す"""
-        return len(self.messages) - 1
-
-    def get_messages_after(self, id):
-        """指定されたidより後のメッセージのリストを返す"""
-        return self.messages[(id + 1):]
-
-    def get_thread_id(self):
-        """
-        Assistant API用のthread_idを返す。初めてAssistant APIを使うタイミングで
-        threadを作成し、過去のメッセージを登録する
-        """
-        if self.thread_id:
-            return self.thread_id
-
-        thread = self.client.beta.threads.create(
-            messages = [
-                {
-                    "role": msg.role,
-                    # ToDo: 32メッセージ以上溜まってからだとエラーになる。
-                    "content": self.content_to_content_param(msg.content),
-                    "attachments": msg.files
-                }
-                for msg in self.messages if msg.role == "user" or msg.role == "assistant"
-            ]
-        )
-        self.thread_id = thread.id
-        
-        return self.thread_id
-
-    @staticmethod
-    def content_to_content_param(content: List[ContentBlock]) -> List[dict]:
-        """
-        オブジェクト形式のcontentを、API送信用にdictに変換する
-        """
-        content_param = []
-        for block in content:
-            if block.type == "text":
-                # このあたり、微妙に一対一関係ではない
-                content_param.append({
-                    "type": block.type,
-                    "text": block.text.value
-                })
-            elif block.type == "image_file":
-                content_param.append({
-                    "type": block.type,
-                    "image_file": {"file_id": block.image_file.file_id, "detail": block.image_file.detail},
-                })
-            elif block.type == "image_url":
-                content_param.append({
-                    "type": block.type,
-                    "image_url": {"url": block.image_url.url, "detail": block.image_url.detail},
-                })
-            elif block.type == "code_interpreter_call":
-                content_param.append({
-                    "type": block.type,
-                    "id": block.id,
-                    "container_id": block.container_id,
-                    "code": block.code
-                })
-            else:
-                raise ValueError(f"未知のコンテンツブロックの type: {block.type}")
-        return content_param
-
-# セッション管理クラス
-class ConversationManager:
-    def __init__(self, clients, assistants):
-        self.client = clients["openai"]
-        self.thread = ChatThread(self.client)
-        self.assistants = assistants
-        self.response_id = None
-        self.response_last_message_id = -1
-        self.code_interpreter_file_ids = []
-
-    def add_message(self, model, role, content, files=None, metadata={}):
-        """メッセージをChatThreadに追加"""
-        self.thread.add_message(model, role, content, files, metadata)
-
-    def get_completion_messages(self, model, text_only=False):
-        """Completion API用にメッセージを変換"""
-        messages = []
-        for msg in self.thread.messages:
-            # Assistant API用のImageFileContentBlock, Response APIのResponseCodeInterpreterToolCallは除く
-            content = [cont for cont in msg.content if not isinstance(cont, (ImageFileContentBlock, ResponseCodeInterpreterToolCall))]
-
-            # Visionサポートの無いモデルにImageを与えるとエラーになるので除く
-            if not model.get("support_vision", False):
-                content = [cont for cont in content if isinstance(cont, TextContentBlock)]
-
-            if text_only:
-                # Deepseekなど、テキストだけ必要な場合はテキストを抽出する
-                content = "\n".join([cont.text.value for cont in content if isinstance(cont, TextContentBlock)])
-            else:
-                # そうでない場合はclassからdictに変換する
-                content = self.thread.content_to_content_param(content)
-
-            messages.append({
-                "role": "assistant" if msg.role == "assistant" else "system" if msg.role == "system" else "system" if msg.role == "developer" else "user",
-                "content": content
-            })
-        return messages
-
-    # Response APIにて、AIから回答があった際、response.idを記録し、そのidがどのメッセージまでに対応しているかを記録する
-    def set_response_id(self, response_id):
-        self.response_id = response_id
-        self.response_last_message_id = self.thread.get_last_message_id()
-
-    # 一旦code_interpreterに与えたファイルは以降も利用できるようにする
-    def add_code_interpreter_file_ids(self, file_ids):
-        self.code_interpreter_file_ids += file_ids
-        # uniq
-        self.code_interpreter_file_ids = list(dict.fromkeys(self.code_interpreter_file_ids))
-        return self.code_interpreter_file_ids
-
-    def get_response_history(self, model, offset = 0):
-        """
-        Response API用にメッセージを変換
-        通常は前回応答の次から。reasoning without問題対応用に、offset=-2でその前の1ターン前に遡れるように
-        """
-
-        def is_file_for(what_for, file):
-            for t in file["tools"]:
-                if t["type"] == what_for:
-                    return True
-            return False
-
-        messages = []
-        for msg in self.thread.get_messages_after(self.response_last_message_id + offset):
-            content = msg.content
-            if msg.role == "assistant":
-                # Assistant API用のImageFileContentBlockは除く。ResponseOutputMessageParamにはimageを添付できない。
-                # 隣接するoutput_textのannotationとして添付する方法があり得るが未実装
-                content = [cont for cont in msg.content if not isinstance(cont, ImageFileContentBlock)]
-
-            # Visionサポートの無いモデルにImageを与えるとエラーになるので除く
-            if not model.get("support_vision", False):
-                content = [cont for cont in content if isinstance(cont, TextContentBlock)]
-
-            # classからdictに変換する
-            content = self.thread.content_to_content_param(content)
-
-            # ToDo: 本当はtypeや不要ブロックの除去はChatThread内に隠蔽すべき。
-
-            # "type"をResponse API向けに修正
-            inout = "output" if msg.role == "assistant" else "input"
-            content = [
-                {
-                    "text": cont["text"],
-                    "type": inout + "_text"
-                } if cont["type"] == "text" else
-                {
-                    "image_url": cont["image_url"]["url"],
-                    "type": "input_image"
-                } if cont["type"] == "image_url" else
-                {
-                    "file_id": cont["image_file"]["file_id"],
-                    "type": "input_image"
-                } if cont["type"] == "image_file" else
-                cont
-            for cont in content]
-
-            # filesをinput_fileとして連結
-            # Response APIでは、Vision対応モデルで、pdfを"input_file"として質問に付加できる。
-            # テキスト及び各ページの画像がモデルに与えられる。
-            # file["tools"]がtype == "file_search"を含む場合、そのファイルをinput_fileとして扱う
-            # 正確には、これはvector検索を用いるいわゆる"file_search"とは異なる機能
-            # type == "code_interpreter"のファイルは別途code_interpreter toolのオプションに添付される
-            if msg.files:
-                content += [
-                    {
-                        "file_id": file["file_id"],
-                        "type": "input_file"
-                    }
-                for file in msg.files if is_file_for("file_search", file)]
-
-            messages.append({
-                "role": "assistant" if msg.role == "assistant" else "system" if msg.role == "system" else "developer" if msg.role == "developer" else "user",
-                "content": content
-            })
-
-            file_ids_for_code_interpreter = [
-                file["file_id"]
-                for file in msg.files if is_file_for("code_interpreter", file)
-            ] if msg.files else []
-            file_ids_for_code_interpreter = self.add_code_interpreter_file_ids(file_ids_for_code_interpreter)
-        return messages, self.response_id, file_ids_for_code_interpreter
-
-    def create_attachments(self, files, tool_for_files):
-        """Assistant, Response API用のファイルアップロード"""
-        attachments = []
-        for file in files:
-            file.seek(0)
-            response = self.client.files.create(
-                file=file,
-                # Response APIのためにはpurpose="user_data"が望ましいが、2025/5/11現在未対応 'Invalid value for purpose.'
-                # "assistants"のままだとResponse APIで、'APIError: An error occurred while processing the request.'
-                # 結局Response APIのinput_fileとしては使えない → 2025/8時点では"input_file"として使えている。
-                purpose="assistants"
-            )
-            # Response APIでは"file_search"はメッセージのinput_fileに、"code_interpreter"はcode_intepreter toolのオプションとして添付する
-            attachments.append(
-                    {
-                        "file_id": response.id,
-                        "tools": [{"type": tool_for_files}],
-                    }
-            )
-        return attachments
-
-    def create_ImageURLContentBlock(self, file, detail_level):
-        mime_type = guess_type(file.name)[0]
-        image_encoded = base64.b64encode(file.getvalue()).decode()
-        image_url = f'data:{mime_type};base64,{image_encoded}'
-        return ImageURLContentBlock(
-            type="image_url",
-            image_url=ImageURL(url=image_url, detail=detail_level)
-        )
-
-# gpt-4oがAssistant APIで画像を認識しないので、ImageFileならと思って加えたが、どうやらモデルの方の問題らしい
-#    def create_ImageFileContentBlock(self, file, detail_level):
-#        response = self.client.files.create(
-#            file=file,
-#            purpose="vision"
-#            # "vision"を指定すると、"purpose contains an invalid purpose vision"と言われてしまう。
-#            # AzureのAPIが追いついていない可能性あり。"assistant"なら受け付けるが、gpt-4oは自分には画像認識能力が無いと言う
-#        )
-#        return ImageFileContentBlock(
-#            type="image_file",
-#            image_file=ImageFile(file_id=response.id, detail=detail_level)
-#        )
 
 def convert_parsed_response_to_assistant_messages(outputs: List[Any]) -> Tuple[List[ContentBlock], List[Dict[str, Any]]]:
     """
@@ -1704,13 +1435,36 @@ if 'switches' not in st.session_state:
     }
 if "need_rerun" not in st.session_state:
     st.session_state.need_rerun = False
+if "streaming" not in st.session_state:
+    st.session_state.streaming = True
+if "show_code_and_logs" not in st.session_state:
+    st.session_state.show_code_and_logs = False
+if "tool_choice" not in st.session_state:
+    st.session_state.tool_choice = True
+
+principal, email, name = get_sub_claim_or_ip()
 
 # メインUI
 st.subheader("IASA Chat Interface")
+st.markdown("""
+<style>
+.st-key-session_storage_bridge_single {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # サイドバー設定
 with st.sidebar:
-    principal, email, name = get_sub_claim_or_ip()
+    run_snapshot_bridge(
+        st.session_state,
+        principal,
+        st.session_state.clients,
+        st.session_state.assistants,
+        on_save_failed=lambda status: st.toast(f"状態保存に失敗しました: {status}", icon="⚠️"),
+    )
+    if st.session_state.get("selected_model_name") not in models:
+        st.session_state.selected_model_name = next(iter(models))
 #    if name:
 #        st.text("Name: " + name)
     if email:
@@ -1720,7 +1474,8 @@ with st.sidebar:
 
     model = models[st.selectbox(
         "Model",
-        models.keys()
+        models.keys(),
+        key="selected_model_name"
     )]
     options = {}
 
@@ -1733,10 +1488,13 @@ with st.sidebar:
             reasoning_effort_choices = model["support_reasoning_effort"]
         else:
             reasoning_effort_choices = ["minimal", "low", "medium", "high"]
+        default_effort = model.get("default_reasoning_effort", "high")
+        if st.session_state.get("reasoning_effort") not in reasoning_effort_choices:
+            st.session_state.reasoning_effort = default_effort if default_effort in reasoning_effort_choices else reasoning_effort_choices[0]
         options["reasoning_effort"] = st.selectbox(
             "reasoning_effort",
             reasoning_effort_choices,
-            index = ({c: i for i, c in enumerate(reasoning_effort_choices)})[model.get("default_reasoning_effort", "high")]
+            key="reasoning_effort",
         )
 
     uploaded_files = None
@@ -1750,7 +1508,8 @@ with st.sidebar:
         if model["api_mode"] in ["assistant", "response"]:
             tool_for_files = st.selectbox(
                 "ファイルの用途",
-                ["file_search", "code_interpreter"]
+                ["file_search", "code_interpreter"],
+                key="tool_for_files"
             )
             st.session_state.switches[tool_for_files] = True
         else:
@@ -1765,7 +1524,8 @@ with st.sidebar:
         )
         detail_level = st.selectbox(
             "画像の詳細レベル",
-            ["auto", "high", "low"]
+            ["auto", "high", "low"],
+            key="detail_level"
         )
 
     if model["api_mode"] == "assistant":
@@ -1818,7 +1578,6 @@ with st.sidebar:
     # DeepSeek V3.2がtool_choice="auto"では上手くtool call出来ないことに対する応急処置
     if model["model"] == "DeepSeek-V3.2" and model["api_mode"] == "completion" and model.get("support_tools", False) and st.toggle(
             "tool_choice required",
-            value=True,
             key="tool_choice"
         ):
         options["tool_choice"] = "required"
@@ -1827,7 +1586,6 @@ with st.sidebar:
     if model["streaming"] and not switches.get("image_generation", False):
         streaming_enabled = st.toggle(
             "streaming mode",
-            value=True,
             key="streaming"
         )
     # image_generation toolは(テキストの)streaming modeには対応していない
@@ -1837,7 +1595,6 @@ with st.sidebar:
     if model["api_mode"] == "assistant" or model["api_mode"] == "response":
         show_code_and_logs = st.toggle(
             "show code and logs",
-            value=False,
             key="show_code_and_logs"
         )
 
@@ -1905,6 +1662,7 @@ if st.session_state.get("processing"):
                 "model": model["model"],
                 "token_usage": metadata["token_usage"]
             }, principal)
+            queue_snapshot_save(st.session_state, principal, conversation)
 
             # 最終的な内容で描画しなおすべきか？当面不要と判断。
             # placeholderを使って清書する事も考えたが、ブラウザ側との同期に失敗し、前のコンテナのコンテンツが
