@@ -18,7 +18,10 @@
 <script>
 (function () {
   const LOG_PREFIX = "[session-storage-component]";
-  let lastValueJson = null;
+  let lastResult = { ok: false, status: "init" };
+  let idleReplaySent = false;
+  let lastMode = null;
+  let lastStatus = null;
 
   function log(message, data) {
     const ts = new Date().toISOString();
@@ -27,6 +30,18 @@
     } else {
       console.log(LOG_PREFIX, ts, message, data);
     }
+  }
+
+  function logTransition(kind, value, extra) {
+    if (kind === "mode") {
+      if (value === lastMode) return;
+      lastMode = value;
+    }
+    if (kind === "status") {
+      if (value === lastStatus) return;
+      lastStatus = value;
+    }
+    log(`${kind} -> ${value}`, extra);
   }
 
   function sendMessageToStreamlitClient(type, data) {
@@ -49,18 +64,6 @@
   }
 
   function setComponentValue(value) {
-    let valueJson = null;
-    try {
-      valueJson = JSON.stringify(value);
-    } catch (_) {
-      valueJson = null;
-    }
-
-    if (valueJson && valueJson === lastValueJson) {
-      return;
-    }
-
-    lastValueJson = valueJson;
     log("setComponentValue", value);
     sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value });
   }
@@ -149,7 +152,13 @@
 
     const args = event.data.args || {};
     const mode = args.mode;
+    logTransition("mode", mode);
+
     if (mode === "idle") {
+      if (!idleReplaySent && lastResult && lastResult.status && lastResult.status !== "init") {
+        idleReplaySent = true;
+        setComponentValue(lastResult);
+      }
       return;
     }
 
@@ -167,7 +176,6 @@
     try {
       if (mode === "load") {
         const payload = sessionStorage.getItem(storageKey);
-        log("load", { storage_key: storageKey, found: Boolean(payload), bytes: payload ? payload.length : 0 });
         result = payload
           ? { ok: true, status: "loaded", found: true, payload_json: payload }
           : { ok: true, status: "empty", found: false };
@@ -183,6 +191,9 @@
       result = { ok: false, status: "error", error: String(e) };
     }
 
+    lastResult = result;
+    idleReplaySent = false;
+    logTransition("status", result.status, { mode: mode, ok: result.ok, found: result.found });
     setComponentValue(result);
   }
 
