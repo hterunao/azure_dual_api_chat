@@ -1,4 +1,6 @@
 import json
+import base64
+import streamlit as st
 import streamlit.components.v1 as components
 
 def login_state_extender(email):
@@ -268,4 +270,8 @@ def login_state_extender(email):
 </body>
 </html>
 """
-    components.html(html, height=80)
+    if hasattr(st, "iframe"):
+        src = "data:text/html;base64," + base64.b64encode(html.encode("utf-8")).decode("ascii")
+        st.iframe(src, height=80)
+    else:
+        components.html(html, height=80)

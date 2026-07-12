@@ -8,7 +8,13 @@ _session_storage_component = components.declare_component(
 )
 
 
-def session_storage_bridge(mode, storage_key, payload_json="", trim_step_bytes=102400, key=None):
+def session_storage_bridge(
+    mode,
+    storage_key,
+    payload_json="",
+    trim_step_bytes=102400,
+    key=None,
+):
     return _session_storage_component(
         mode=mode,
         storage_key=storage_key,
