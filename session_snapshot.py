@@ -5,6 +5,7 @@ from session_storage_bridge import session_storage_bridge
 
 
 SESSION_SNAPSHOT_KEY = "iasa_chat_snapshot_v1"
+SESSION_OUTBOX_KEY = "iasa_chat_outbox_v1"
 SESSION_SNAPSHOT_TRIM_STEP_BYTES = 100 * 1024
 SNAPSHOT_INIT_MAX_RETRY = 4
 SNAPSHOT_EMPTY_MAX_RETRY = 2
@@ -36,6 +37,11 @@ def snapshot_log(event, **kwargs):
         "load.completed",
         "load.wait_principal_recovery",
         "load.schedule_clear",
+        "outbox.queue_save",
+        "outbox.queue_clear",
+        "outbox.loaded",
+        "outbox.load_invalid",
+        "outbox.load_principal_mismatch",
     }
     if event not in important_events:
         return
@@ -132,6 +138,36 @@ def queue_snapshot_save(session_state, principal, conversation, ui_state_keys=DE
     session_state["need_rerun"] = True
 
 
+def _serialize_outbox(principal, pending_user_message):
+    payload = {
+        "version": 1,
+        "principal": principal,
+        "pending_user_message": _safe_json_value(pending_user_message),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def queue_outbox_save(session_state, principal, pending_user_message):
+    snapshot_log("outbox.queue_save", principal=principal)
+    session_state["_outbox_save_pending"] = {
+        "principal": principal,
+        "payload_json": _serialize_outbox(principal, pending_user_message),
+    }
+    session_state["need_rerun"] = True
+
+
+def queue_outbox_clear(session_state):
+    snapshot_log("outbox.queue_clear")
+    session_state["_outbox_clear_pending"] = True
+    session_state["need_rerun"] = True
+
+
+def pop_loaded_outbox_message(session_state):
+    msg = session_state.get("_outbox_loaded_message")
+    session_state["_outbox_loaded_message"] = None
+    return msg
+
+
 def _ensure_bridge_state(session_state):
     if "_snapshot_init_retry_count" not in session_state:
         session_state["_snapshot_init_retry_count"] = 0
@@ -141,6 +177,117 @@ def _ensure_bridge_state(session_state):
         session_state["_snapshot_mismatch_retry_count"] = 0
     if "_snapshot_load_waiting" not in session_state:
         session_state["_snapshot_load_waiting"] = False
+    if "_outbox_init_retry_count" not in session_state:
+        session_state["_outbox_init_retry_count"] = 0
+    if "_outbox_load_waiting" not in session_state:
+        session_state["_outbox_load_waiting"] = False
+    if "_outbox_restore_completed" not in session_state:
+        session_state["_outbox_restore_completed"] = False
+    if "_outbox_loaded_message" not in session_state:
+        session_state["_outbox_loaded_message"] = None
+
+
+def _process_outbox_load_result(session_state, principal, status):
+    if not (status.get("ok") and status.get("found")):
+        session_state["_outbox_loaded_message"] = None
+        return
+
+    payload_json = status.get("payload_json")
+    try:
+        payload = json.loads(payload_json or "{}")
+    except Exception:
+        snapshot_log("outbox.load_invalid")
+        session_state["_outbox_loaded_message"] = None
+        return
+
+    saved_principal = payload.get("principal")
+    if saved_principal != principal:
+        snapshot_log("outbox.load_principal_mismatch", saved_principal=saved_principal, current_principal=principal)
+        session_state["_outbox_loaded_message"] = None
+        return
+
+    pending_msg = payload.get("pending_user_message")
+    if isinstance(pending_msg, dict):
+        session_state["_outbox_loaded_message"] = pending_msg
+        snapshot_log("outbox.loaded", message_id=pending_msg.get("id"))
+    else:
+        session_state["_outbox_loaded_message"] = None
+
+
+def run_outbox_bridge(session_state, principal):
+    _ensure_bridge_state(session_state)
+
+    pending = session_state.get("_outbox_save_pending")
+    mode = "idle"
+    payload_json = ""
+    load_waiting = bool(session_state.get("_outbox_load_waiting"))
+
+    if session_state.get("_outbox_clear_pending"):
+        mode = "clear"
+    elif not session_state.get("_outbox_restore_completed"):
+        mode = "idle" if load_waiting else "load"
+    elif isinstance(pending, dict):
+        if pending.get("principal") != principal:
+            session_state["_outbox_save_pending"] = None
+            mode = "idle"
+        else:
+            mode = "save"
+            payload_json = pending.get("payload_json", "{}")
+
+    status = session_storage_bridge(
+        mode=mode,
+        storage_key=SESSION_OUTBOX_KEY,
+        payload_json=payload_json,
+        trim_step_bytes=SESSION_SNAPSHOT_TRIM_STEP_BYTES,
+        key="session_storage_bridge_outbox",
+    )
+
+    if mode == "load":
+        session_state["_outbox_load_waiting"] = True
+        return
+
+    if mode == "idle" and not load_waiting:
+        return
+
+    if not isinstance(status, dict):
+        return
+
+    if status.get("status") == "init":
+        if load_waiting:
+            session_state["_outbox_load_waiting"] = False
+        retry_count = session_state.get("_outbox_init_retry_count", 0) + 1
+        session_state["_outbox_init_retry_count"] = retry_count
+        if retry_count <= SNAPSHOT_INIT_MAX_RETRY:
+            if mode == "save" or mode == "clear":
+                session_state["need_rerun"] = True
+            return
+
+        if mode == "load" or (mode == "idle" and not session_state.get("_outbox_restore_completed")):
+            session_state["_outbox_restore_completed"] = True
+            session_state["_outbox_loaded_message"] = None
+        elif mode == "save":
+            session_state["_outbox_save_pending"] = None
+        elif mode == "clear":
+            session_state["_outbox_clear_pending"] = False
+        return
+
+    session_state["_outbox_init_retry_count"] = 0
+
+    if mode == "clear":
+        session_state["_outbox_clear_pending"] = False
+        session_state["_outbox_loaded_message"] = None
+        return
+
+    if load_waiting:
+        session_state["_outbox_load_waiting"] = False
+
+    if mode == "idle" and not session_state.get("_outbox_restore_completed"):
+        _process_outbox_load_result(session_state, principal, status)
+        session_state["_outbox_restore_completed"] = True
+        return
+
+    if mode == "save":
+        session_state["_outbox_save_pending"] = None
 
 
 def run_snapshot_bridge(session_state, principal, clients, assistants, on_save_failed=None):
