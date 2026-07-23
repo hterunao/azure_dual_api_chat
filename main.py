@@ -1232,6 +1232,15 @@ models = {
     "streaming": True,
     "pricing": {"in": 2.5, "cached": 0.25, "out":15} #https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-5-4-in-microsoft-foundry/4499785
   },
+  "Kimi-K2.6": {
+    "model": "Kimi-K2.6",
+    "client": st.session_state.clients["services_openaiv1"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 0.95, "cached": 4, "out":4} #https://azure.microsoft.com/en-us/pricing/details/ai-foundry-models/kimi/
+  },
   "GPT-5.2-response": {
     "model": "gpt-5.2",
     "client": st.session_state.clients["openai"],
