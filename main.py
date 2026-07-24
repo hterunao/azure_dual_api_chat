@@ -13,6 +13,7 @@ import time
 import base64
 import re
 import copy
+from uuid import uuid4
 from functools import reduce
 import httpx
 from openai import AssistantEventHandler, AzureOpenAI, OpenAI
@@ -55,7 +56,14 @@ import processPDF
 from cosmos_nosql import CosmosDB
 from keepalive import login_state_extender
 from conversation_state import ChatMessage, ConversationManager
-from session_snapshot import queue_snapshot_save, run_snapshot_bridge
+from session_snapshot import (
+    queue_snapshot_save,
+    queue_outbox_save,
+    queue_outbox_clear,
+    pop_loaded_outbox_message,
+    run_snapshot_bridge,
+    run_outbox_bridge,
+)
 
 ContentBlock = ImageFileContentBlock | ImageURLContentBlock | TextContentBlock | ResponseCodeInterpreterToolCall
 
@@ -1232,6 +1240,15 @@ models = {
     "streaming": True,
     "pricing": {"in": 2.5, "cached": 0.25, "out":15} #https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-5-4-in-microsoft-foundry/4499785
   },
+  "Kimi-K2.6": {
+    "model": "Kimi-K2.6",
+    "client": st.session_state.clients["services_openaiv1"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 0.95, "cached": 4, "out":4} #https://azure.microsoft.com/en-us/pricing/details/ai-foundry-models/kimi/
+  },
   "GPT-5.2-response": {
     "model": "gpt-5.2",
     "client": st.session_state.clients["openai"],
@@ -1496,6 +1513,7 @@ with st.sidebar:
         st.session_state.assistants,
         on_save_failed=lambda status: st.toast(f"状態保存に失敗しました: {status}", icon="⚠️"),
     )
+    run_outbox_bridge(st.session_state, principal)
     if st.session_state.get("selected_model_name") not in models:
         st.session_state.selected_model_name = next(iter(models))
 #    if name:
@@ -1640,6 +1658,40 @@ if "conversation" not in st.session_state:
     st.session_state.conversation.add_message(model, "developer", 'Formatting re-enabled - please enclose code blocks with appropriate markdown tags. ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じて、質問の意図を明確にするための質問や方向性の提案をしてください。また、ツールの利用回数がある一つの応答のためだけに7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。code_interpreterを用いてユーザーに提供するファイルは必ずユーザー可視のツール（例：python_user_visible）で /mnt/data に直接書き出し 、同一実行で stdout にフルパスを出力しててください。', [])
 conversation = st.session_state.conversation 
 
+
+def _extract_user_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None):
+                return block.text.value
+    return ""
+
+
+def _has_same_user_text(messages, text, tail=3):
+    if not text:
+        return False
+    for msg in reversed(messages[-tail:]):
+        if getattr(msg, "role", None) != "user":
+            continue
+        msg_text = _extract_user_text(getattr(msg, "content", ""))
+        if msg_text == text:
+            return True
+    return False
+
+
+loaded_outbox_message = pop_loaded_outbox_message(st.session_state)
+if isinstance(loaded_outbox_message, dict):
+    recovered_text = str(loaded_outbox_message.get("text") or "")
+    if recovered_text and not _has_same_user_text(conversation.thread.messages, recovered_text):
+        conversation.add_message(model, "user", recovered_text, [])
+        st.session_state.processing = True
+        st.toast("未送信メッセージを復元しました", icon="💾")
+        st.rerun()
+    else:
+        queue_outbox_clear(st.session_state)
+
 if content := st.chat_input("メッセージを入力"):
         # ファイル処理
         attachments = []
@@ -1663,6 +1715,16 @@ if content := st.chat_input("メッセージを入力"):
     
         # メッセージ追加
         conversation.add_message(model, "user", content, attachments)
+        outbox_text = _extract_user_text(content)
+        outbox_message = {
+            "id": str(uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": outbox_text,
+            "has_files": bool(attachments),
+            "files_meta": [f.get("file_id") if isinstance(f, dict) else str(f) for f in attachments] if attachments else [],
+        }
+        queue_outbox_save(st.session_state, principal, outbox_message)
+        queue_snapshot_save(st.session_state, principal, conversation)
         # 処理中へ移行
         st.session_state.processing = True
         st.rerun()  # ここで一旦再描画(ファイルのクリアなどに必要)
@@ -1696,6 +1758,7 @@ if st.session_state.get("processing"):
                 "token_usage": metadata["token_usage"]
             }, principal)
             queue_snapshot_save(st.session_state, principal, conversation)
+            queue_outbox_clear(st.session_state)
 
             # 最終的な内容で描画しなおすべきか？当面不要と判断。
             # placeholderを使って清書する事も考えたが、ブラウザ側との同期に失敗し、前のコンテナのコンテンツが
