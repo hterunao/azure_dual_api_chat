@@ -91,11 +91,8 @@ def get_sub_claim_or_ip():
             decoded_bytes = base64.b64decode(client_principal_encoded)
             # JSONパース
             principal = json.loads(decoded_bytes.decode("utf-8"))
-            print(principal)
             claims = principal.get("claims", {})
-            print(claims)
             claims = {claim["typ"]: claim["val"] for claim in claims}
-            print(claims)
 
             if "name" in claims:
                 name = claims["name"]
@@ -108,7 +105,6 @@ def get_sub_claim_or_ip():
 
     # X‑Forwarded‑ForまたはREMOTE_ADDRヘッダーからIPアドレスを取得する
     ip = headers.get("X-Forwarded-For") or headers.get("REMOTE_ADDR")
-    print(headers.to_dict())
     if ip:
         return ip, None, None
     else:
@@ -458,8 +454,6 @@ def get_file_info(file_id: str) -> bytes:
 
 def parse_annotations(value: str, annotations: List[Annotation]):
     files = []
-#    print(value)
-    print(f"annotations={annotations}")
     for (
         index,
         annotation,
@@ -1115,7 +1109,6 @@ def get_assistant(client, mode):
     name=f"汎用アシスタント({mode})"
     assistant = None
     assistants = client.beta.assistants.list(order='desc', limit="100")
-    print(assistants)
     for i in assistants.data:
         if i.created_at < time.time() - 86400:
             client.beta.assistants.delete(assistant_id=i.id)

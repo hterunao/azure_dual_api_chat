@@ -18,8 +18,9 @@
 <script>
 (function () {
   const LOG_PREFIX = "[session-storage-component]";
-  let lastResult = { ok: false, status: "init" };
-  let idleReplaySent = false;
+  let lastResult = { ok: false, status: "init", request_id: "", mode: "" };
+  let lastResultSerialized = JSON.stringify(lastResult);
+  let lastIdleReplayRequestId = null;
   let lastMode = null;
   let lastStatus = null;
 
@@ -114,6 +115,28 @@
       return { ok: false, status: "invalid_payload", error: String(e) };
     }
 
+    try {
+      const existingRaw = sessionStorage.getItem(storageKey);
+      if (existingRaw) {
+        const existingObj = JSON.parse(existingRaw);
+        const incomingSeq = Number((obj._meta || {}).write_seq || 0);
+        const existingSeq = Number((existingObj._meta || {}).write_seq || 0);
+        const incomingCount = Number((obj._meta || {}).message_count || (((obj.conversation || {}).messages || []).length) || 0);
+        const existingCount = Number((existingObj._meta || {}).message_count || (((existingObj.conversation || {}).messages || []).length) || 0);
+        if (existingSeq > incomingSeq || (existingSeq === incomingSeq && existingCount > incomingCount)) {
+          log("save blocked: stale write", {
+            existing_seq: existingSeq,
+            incoming_seq: incomingSeq,
+            existing_count: existingCount,
+            incoming_count: incomingCount,
+          });
+          return { ok: false, status: "stale_write_blocked" };
+        }
+      }
+    } catch (e) {
+      log("save guard parse failed (ignored)", { error: String(e) });
+    }
+
     while (true) {
       const raw = JSON.stringify(obj);
       try {
@@ -152,11 +175,19 @@
 
     const args = event.data.args || {};
     const mode = args.mode;
+    const requestId = String(args.request_id || "");
     logTransition("mode", mode);
 
     if (mode === "idle") {
-      if (!idleReplaySent && lastResult && lastResult.status && lastResult.status !== "init") {
-        idleReplaySent = true;
+      if (
+        requestId &&
+        lastResult &&
+        lastResult.status &&
+        lastResult.status !== "init" &&
+        String(lastResult.request_id || "") === requestId &&
+        lastIdleReplayRequestId !== requestId
+      ) {
+        lastIdleReplayRequestId = requestId;
         setComponentValue(lastResult);
       }
       return;
@@ -191,8 +222,17 @@
       result = { ok: false, status: "error", error: String(e) };
     }
 
+    result.mode = mode;
+    result.request_id = requestId;
+    const nextSerialized = JSON.stringify(result);
+    if (nextSerialized === lastResultSerialized) {
+      return;
+    }
     lastResult = result;
-    idleReplaySent = false;
+    lastResultSerialized = nextSerialized;
+    if (mode === "load") {
+      lastIdleReplayRequestId = null;
+    }
     logTransition("status", result.status, { mode: mode, ok: result.ok, found: result.found });
     setComponentValue(result);
   }
