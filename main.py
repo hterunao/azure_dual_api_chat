@@ -1152,7 +1152,7 @@ if "clients" not in st.session_state:
             azure_endpoint = os.getenv("ENDPOINT_URL"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             api_version="2025-04-01-preview",
-            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-1"},
+            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-2"},
             timeout=httpx.Timeout(1200.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         # v1 preview
@@ -1161,7 +1161,7 @@ if "clients" not in st.session_state:
             base_url = os.getenv("ENDPOINT_URL").rstrip("/") + "/openai/v1/",
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             default_query={"api-version": "preview"},
-            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-1"},
+            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-2"},
             timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         "services_openaiv1": OpenAI(
