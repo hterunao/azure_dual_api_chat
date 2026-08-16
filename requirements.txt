@@ -1,7 +1,7 @@
 streamlit
 openai
 python-dotenv
-langchain-community
+httpx
 bs4
 azure.ai.inference
 azure-cosmos

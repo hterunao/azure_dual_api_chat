@@ -1,166 +1,187 @@
-import os
 import json
+import os
 from os.path import dirname, join
+
+import httpx
 from dotenv import load_dotenv
-from langchain_community.utilities import GoogleSerperAPIWrapper
-from typing import Literal
 
 dotenv_path = join(dirname(__file__), ".env.local")
 load_dotenv(dotenv_path)
 
-class GoogleSerperAPIWrapper_mod(GoogleSerperAPIWrapper):
-    type: Literal["news", "search", "places", "images", "scholar"] = "search"
 
-search = GoogleSerperAPIWrapper_mod(
-    serper_api_key = os.getenv("SERPER_API_KEY")
-)
+def is_enabled():
+    return bool(os.getenv("SERPER_API_KEY"))
 
-search_news = GoogleSerperAPIWrapper_mod(
-    type="news",
-    serper_api_key = os.getenv("SERPER_API_KEY")
-)
-
-search_scholar = GoogleSerperAPIWrapper_mod(
-    type="scholar",
-    serper_api_key = os.getenv("SERPER_API_KEY")
-)
 
 run = {
-            "type": "function",
-            "function": {
-                "name": "get_google_serper",
-                "description": "Perform a Google search to get latest information and get concise search results",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for",
-                        },
-                    },
-                    "required": ["query"],
+    "type": "function",
+    "function": {
+        "name": "get_google_serper",
+        "description": "Perform a Google search to get latest information and get concise search results",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for",
                 },
-            }
+            },
+            "required": ["query"],
+        },
+    },
 }
 
 results = {
-            "type": "function",
-            "function": {
-                "name": "get_google_results",
-                "description": "Perform a Google search for latest or detailed information and get detailed results and metadata with JSON format",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for",
-                        },
-                    },
-                    "required": ["query"],
+    "type": "function",
+    "function": {
+        "name": "get_google_results",
+        "description": "Perform a Google search for latest or detailed information and get detailed results and metadata with JSON format",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for",
                 },
-            }
+            },
+            "required": ["query"],
+        },
+    },
 }
 
 scholar = {
-            "type": "function",
-            "function": {
-                "name": "get_google_scholar",
-                "description": "Get Google Scholar result for given search words in JSON format.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for",
-                        },
-                    },
-                    "required": ["query"],
+    "type": "function",
+    "function": {
+        "name": "get_google_scholar",
+        "description": "Get Google Scholar result for given search words in JSON format.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for",
                 },
-            }
+            },
+            "required": ["query"],
+        },
+    },
 }
 
 news = {
-            "type": "function",
-            "function": {
-                "name": "get_google_news",
-                "description": "Get latest news for given search words in JSON format.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for",
-                        },
-                    },
-                    "required": ["query"],
+    "type": "function",
+    "function": {
+        "name": "get_google_news",
+        "description": "Get latest news for given search words in JSON format.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for",
                 },
-            }
+            },
+            "required": ["query"],
+        },
+    },
 }
 
 places = {
-            "type": "function",
-            "function": {
-                "name": "get_google_places",
-                "description": "Get latest places information (e.g. restaurants or shops or famous places) in JSON format for given search words",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for",
-                        },
-                        "country": {
-                            "type": "string",
-                            "description": "Country where the place to search is located (ISO 3166-1 alpha-2, e.g. us, uk, jp)",
-                        },
-                        "langage": {
-                            "type": "string",
-                            "description": "Language to express results (ISO639, e.g. en, ja)",
-                        },
-                    },
-                    "required": ["query"],
+    "type": "function",
+    "function": {
+        "name": "get_google_places",
+        "description": "Get latest places information (e.g. restaurants or shops or famous places) in JSON format for given search words",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to search for",
                 },
-            }
+                "country": {
+                    "type": "string",
+                    "description": "Country where the place to search is located (ISO 3166-1 alpha-2, e.g. us, uk, jp)",
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Language to express results (ISO639, e.g. en, ja)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 }
 
+
+def _error_result(query, message):
+    return json.dumps({"provider": "serper", "query": query, "error": message}, ensure_ascii=False)
+
+
+def _post_serper(path, payload):
+    api_key = os.getenv("SERPER_API_KEY")
+    if not api_key:
+        return None, "SERPER_API_KEY is not set"
+
+    url = f"https://google.serper.dev/{path}"
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.json(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _compact_organic(data):
+    return [
+        {
+            "title": item.get("title", ""),
+            "url": item.get("link", ""),
+            "snippet": item.get("snippet", ""),
+            "source": item.get("source", ""),
+        }
+        for item in data.get("organic", [])[:10]
+    ]
+
+
 def get_google_serper(query):
-    """Get the Google Serper result"""
-    print(f"get_google_serper called with query: {query}")
-    result = search.run(query)
-    print(f"result: {result}")
-    return json.dumps({"query": query, "result": result})
+    data, error = _post_serper("search", {"q": query})
+    if error:
+        return _error_result(query, error)
+    concise = "\n".join([f"- {x['title']}: {x['url']}" for x in _compact_organic(data)[:5]])
+    return json.dumps(
+        {"provider": "serper", "query": query, "result": concise, "items": _compact_organic(data)},
+        ensure_ascii=False,
+    )
+
 
 def get_google_results(query):
-    """Get the Google Serper detailed result"""
-    print(f"get_google_results called with query: {query}")
-    results = search.results(query)
-    print(f"results: {results}")
-    return json.dumps({"query": query, "result": results})
+    data, error = _post_serper("search", {"q": query})
+    if error:
+        return _error_result(query, error)
+    return json.dumps({"provider": "serper", "query": query, "result": data}, ensure_ascii=False)
+
 
 def get_google_scholar(query):
-    """Get the Google scholar"""
-    print(f"get_google_scholar called with query: {query}")
-    results = search_scholar.results(query)
-    print(f"results: {results}")
-    return json.dumps({"query": query, "result": results})
+    data, error = _post_serper("scholar", {"q": query})
+    if error:
+        return _error_result(query, error)
+    return json.dumps({"provider": "serper", "query": query, "result": data}, ensure_ascii=False)
+
 
 def get_google_news(query):
-    """Get the Google news"""
-    print(f"get_google_news called with query: {query}")
-    results = search_news.results(query)
-    print(f"results: {results}")
-    return json.dumps({"query": query, "result": results})
+    data, error = _post_serper("news", {"q": query})
+    if error:
+        return _error_result(query, error)
+    return json.dumps({"provider": "serper", "query": query, "result": data}, ensure_ascii=False)
+
 
 def get_google_places(query, country, language):
-    """Get the Google places"""
-    print(f"get_google_places called with query: {query}")
-    search_places = GoogleSerperAPIWrapper(
-        type="places",
-        gl=country,
-        hl=language,
-        serper_api_key = os.getenv("SERPER_API_KEY")
-    )
-    results = search_places.results(query)
-    print(f"results: {results}")
-    return json.dumps({"query": query, "result": results})
-
+    payload = {"q": query, "gl": country, "hl": language}
+    data, error = _post_serper("places", payload)
+    if error:
+        return _error_result(query, error)
+    return json.dumps({"provider": "serper", "query": query, "result": data}, ensure_ascii=False)

@@ -51,6 +51,10 @@ from azure.ai.inference.models._models import (
 import concurrent.futures
 import customTools
 import serperTools
+import braveTools
+import exaTools
+import tavilyTools
+import serpApiTools
 import internetAccess
 import processPDF
 from cosmos_nosql import CosmosDB
@@ -126,7 +130,41 @@ class HallucinatedToolCalls:
 dotenv_path = join(dirname(__file__), ".env.local")
 load_dotenv(dotenv_path)
 
-tools=[{"type": "code_interpreter"}, {"type": "file_search"}, {"type": "web_search_preview" }, {"type": "image_generation"}, customTools.time, serperTools.run, serperTools.results, serperTools.scholar, serperTools.news, serperTools.places, internetAccess.html, processPDF.pdf]
+
+def get_enabled_search_function_tools(mode="runtime"):
+    function_tools = []
+
+    if serperTools.is_enabled():
+        function_tools.extend([serperTools.run, serperTools.results])
+        if mode != "production":
+            function_tools.extend([serperTools.scholar, serperTools.news, serperTools.places])
+
+    if braveTools.is_enabled():
+        function_tools.append(braveTools.search)
+    if exaTools.is_enabled():
+        function_tools.append(exaTools.search)
+    if tavilyTools.is_enabled():
+        function_tools.append(tavilyTools.search)
+    if serpApiTools.is_enabled():
+        function_tools.append(serpApiTools.search)
+
+    return function_tools
+
+
+def build_tool_catalog():
+    return [
+        {"type": "code_interpreter"},
+        {"type": "file_search"},
+        {"type": "web_search_preview"},
+        {"type": "image_generation"},
+        customTools.time,
+        *get_enabled_search_function_tools(mode="runtime"),
+        internetAccess.html,
+        processPDF.pdf,
+    ]
+
+
+tools = build_tool_catalog()
 
 class StreamHandler(AssistantEventHandler):
     @override
@@ -626,6 +664,26 @@ def function_calling(fname, fargs):
                 country=fargs.get("country", "jp"),
                 language=fargs.get("language", "ja")
             )
+        elif fname == "get_brave_results":
+            st.toast(f"[Brave] {fargs.get('query')}", icon="🦁")
+            fresponse = braveTools.get_brave_results(
+                query=fargs.get("query")
+            )
+        elif fname == "get_exa_results":
+            st.toast(f"[Exa] {fargs.get('query')}", icon="🔎")
+            fresponse = exaTools.get_exa_results(
+                query=fargs.get("query")
+            )
+        elif fname == "get_tavily_results":
+            st.toast(f"[Tavily] {fargs.get('query')}", icon="🔎")
+            fresponse = tavilyTools.get_tavily_results(
+                query=fargs.get("query")
+            )
+        elif fname == "get_serpapi_results":
+            st.toast(f"[SerpApi] {fargs.get('query')}", icon="🔎")
+            fresponse = serpApiTools.get_serpapi_results(
+                query=fargs.get("query")
+            )
         elif fname == "parse_html_content":
             st.toast("[parse html content]", icon="👀");
             fresponse = internetAccess.parse_html_content(
@@ -794,6 +852,8 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
             annotation_metadata = []
             full_response = ""
             tool_call_count = 0
+            previous_not_found_retry_count = 0
+            previous_not_found_retry_max = 3
             while True:
                 print(f"args: {args}")
 
@@ -814,6 +874,30 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
 
                 except Exception as e:
                     print(e)
+                    # previous_response_idが見つからない場合は、ローカル履歴を明示的に再送して継続
+                    if "previous_response_not_found" in str(e) or "Previous response with id" in str(e):
+                        if previous_not_found_retry_count < previous_not_found_retry_max:
+                            previous_not_found_retry_count += 1
+                            print(
+                                f"===== previous_response_id not found. Retry after 2s "
+                                f"({previous_not_found_retry_count}/{previous_not_found_retry_max})"
+                            )
+                            time.sleep(2)
+                            continue
+
+                        print("===== previous_response_id not found. Falling back to full local history replay.")
+                        replay_input, replay_response_id, replay_file_ids = conversation.get_response_history(model)
+                        # 直前に生成したfunction_call_outputがあれば末尾に連結して継続
+                        current_input = args.get("input", [])
+                        if not isinstance(current_input, list):
+                            current_input = [current_input]
+                        args["input"] = replay_input + current_input
+                        args.pop("previous_response_id", None)
+                        if model["support_tools"] and selected_tools:
+                            args["tools"] = prepare_tools_for_response_api(selected_tools, replay_file_ids)
+                        previous_not_found_retry_count = 0
+                        continue
+
                     # reasoning without問題に対する再試行処理。APIが改善されれば不要になるはず
                     if (m := re.search(r"'(rs_[0-9a-f]+)' of type 'reasoning' was provided without its required following item\.", str(e))) and args["previous_response_id"]:
                         print("===== BadRequestError: 'reasoning' was provided without its required following...")
@@ -842,6 +926,7 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
                     raise
 
                 print(response)
+                previous_not_found_retry_count = 0
 
                 eblocks, emetadata = convert_parsed_response_to_assistant_messages(response.output)
                 contents += eblocks
@@ -1099,12 +1184,14 @@ def get_assistant(client, mode):
     # IF: https://platform.openai.com/docs/assistants/how-it-works/creating-assistants
     current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
-    if mode == "development":
-        instructions=f"あなたは汎用的なアシスタントです。質問には簡潔かつ正確に答えてください。現在の日時は「{current_time}」であることを考慮し、時機にかなった回答を心がけます。あなたはオンラインで最新の情報を検索することができます。"
-        tools=[{"type": "code_interpreter"}, customTools.time, serperTools.run, serperTools.results, serperTools.news, serperTools.places, internetAccess.html, processPDF.pdf]
-    else:
-        instructions=f"あなたは汎用的なアシスタントです。質問には簡潔かつ正確に答えてください。現在の日時は「{current_time}」であることを考慮し、時機にかなった回答を心がけます。あなたはオンラインで最新の情報を検索することができます。"
-        tools=[{"type": "code_interpreter"}, customTools.time, serperTools.run, serperTools.results, internetAccess.html, processPDF.pdf]
+    instructions=f"あなたは汎用的なアシスタントです。質問には簡潔かつ正確に答えてください。現在の日時は「{current_time}」であることを考慮し、時機にかなった回答を心がけます。あなたはオンラインで最新の情報を検索することができます。"
+    tools=[
+        {"type": "code_interpreter"},
+        customTools.time,
+        *get_enabled_search_function_tools(mode=mode),
+        internetAccess.html,
+        processPDF.pdf,
+    ]
 
     name=f"汎用アシスタント({mode})"
     assistant = None
@@ -1173,9 +1260,15 @@ if "clients" not in st.session_state:
     }
 
 if "assistants" not in st.session_state:
-    st.session_state.assistants = {
-        "gpt-4o": get_assistant(st.session_state.clients["openai"], os.getenv("IASA_DEPLOYMENT_MODE", "development"))
-    }
+    # Assistant API廃止対応のため、デフォルトでは初期化しない。
+    # 必要になった場合のみ、下記を復活させる。
+    # st.session_state.assistants = {
+    #     "gpt-4o": get_assistant(
+    #         st.session_state.clients["openai"],
+    #         os.getenv("IASA_DEPLOYMENT_MODE", "development")
+    #     )
+    # }
+    st.session_state.assistants = {}
 
 models = {
   "GPT-5.6-sol-response": {
@@ -1414,16 +1507,17 @@ models = {
     "streaming": True,
     "pricing": {"in": 75, "out":150}
   },
-  "GPT-4o": {
-    "model": "GPT-4o",
-    "client": st.session_state.clients["openai"],
-    "api_mode": "assistant",
-    "assistant_id": st.session_state.assistants["gpt-4o"],
-    "support_vision": False,
-    "support_tools": True,
-    "streaming": True,
-    "pricing": {"in": 2.5, "out":10}
-  },
+  # Assistant API廃止対応のため無効化
+  # "GPT-4o": {
+  #   "model": "GPT-4o",
+  #   "client": st.session_state.clients["openai"],
+  #   "api_mode": "assistant",
+  #   "assistant_id": st.session_state.assistants["gpt-4o"],
+  #   "support_vision": False,
+  #   "support_tools": True,
+  #   "streaming": True,
+  #   "pricing": {"in": 2.5, "out":10}
+  # },
 #  "GPT-4o-nostream": {
 #    "model": "GPT-4o",
 #    "client": st.session_state.clients["openai"],
@@ -1472,10 +1566,25 @@ if 'switches' not in st.session_state:
         "code_interpreter": True,
         "file_search": True,
         "web_search_preview": True,
-        "get_google_results": True,
+        "get_brave_results": True,
+        "get_exa_results": False,
+        "get_tavily_results": False,
+        "get_serpapi_results": False,
+        "get_google_results": False,
         "parse_html_content": True,
         "extract_pdf_content": True
     }
+else:
+    switch_defaults = {
+        "get_brave_results": True,
+        "get_exa_results": False,
+        "get_tavily_results": False,
+        "get_serpapi_results": False,
+        "get_google_results": False,
+    }
+    for _key, _value in switch_defaults.items():
+        if _key not in st.session_state.switches:
+            st.session_state.switches[_key] = _value
 if "need_rerun" not in st.session_state:
     st.session_state.need_rerun = False
 if "streaming" not in st.session_state:
