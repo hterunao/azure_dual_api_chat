@@ -13,6 +13,7 @@ def session_storage_bridge(
     storage_key,
     payload_json="",
     trim_step_bytes=102400,
+    request_id="",
     key=None,
 ):
     return _session_storage_component(
@@ -20,6 +21,7 @@ def session_storage_bridge(
         storage_key=storage_key,
         payload_json=payload_json,
         trim_step_bytes=trim_step_bytes,
+        request_id=request_id,
         key=key,
         default={"ok": False, "status": "init"},
     )
