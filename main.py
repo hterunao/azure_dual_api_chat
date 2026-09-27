@@ -1271,6 +1271,39 @@ if "assistants" not in st.session_state:
     st.session_state.assistants = {}
 
 models = {
+  "GPT-6-sol-response": {
+    "model": "gpt-6-sol",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 2.0, "cached": 2.5, "out":10} # cached in 0.2
+  },
+  "GPT-6-astra-response": {
+    "model": "gpt-6-astra",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 10.0, "cached": 12.5, "out":50} # cached in 1
+  },
+  "GPT-6-luna-response": {
+    "model": "gpt-6-luna",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 0.1, "cached": 0.125, "out":0.5} # cached in 0.01
+  },
   "GPT-5.6-sol-response": {
     "model": "gpt-5.6-sol",
     "client": st.session_state.clients["openai"],
