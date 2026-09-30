@@ -151,12 +151,16 @@ def get_enabled_search_function_tools(mode="runtime"):
     return function_tools
 
 
+IMAGE_GENERATION_MODEL = os.getenv("IMAGE_GENERATION_TOOL_MODEL", "gpt-image-2.5-sunburst")
+IMAGE_GENERATION_DEPLOYMENT = os.getenv("IMAGE_GENERATION_DEPLOYMENT", "gpt-image-2.5-sunburst")
+
+
 def build_tool_catalog():
     return [
         {"type": "code_interpreter"},
         {"type": "file_search"},
         {"type": "web_search_preview"},
-        {"type": "image_generation"},
+        {"type": "image_generation", "model": IMAGE_GENERATION_MODEL},
         customTools.time,
         *get_enabled_search_function_tools(mode="runtime"),
         internetAccess.html,
@@ -165,6 +169,57 @@ def build_tool_catalog():
 
 
 tools = build_tool_catalog()
+
+MASKED_BLOB_KEYS = {"result", "image_base64", "b64_json"}
+
+
+def _is_base64_like_blob(text: str) -> bool:
+    if len(text) < 256:
+        return False
+    if text.startswith("data:image/") and "base64," in text:
+        return True
+    sample = text[:1024]
+    if not re.fullmatch(r"[A-Za-z0-9+/=\s]+", sample):
+        return False
+    return True
+
+
+def sanitize_for_debug_log(value: Any, key: Optional[str] = None, depth: int = 0) -> Any:
+    if depth > 8:
+        return "<omitted: max depth>"
+
+    if isinstance(value, str):
+        if key in MASKED_BLOB_KEYS and len(value) > 64:
+            return f"<masked:{key}, len={len(value)}>"
+        if _is_base64_like_blob(value):
+            return f"<masked:base64_like, len={len(value)}>"
+        return value
+
+    if isinstance(value, dict):
+        return {
+            k: sanitize_for_debug_log(v, key=k, depth=depth + 1)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [sanitize_for_debug_log(v, key=key, depth=depth + 1) for v in value]
+
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            return sanitize_for_debug_log(dumped, key=key, depth=depth + 1)
+        except Exception:
+            return str(value)
+
+    return value
+
+
+def debug_print(label: str, value: Any) -> None:
+    try:
+        print(f"{label}: {sanitize_for_debug_log(value)}")
+    except Exception:
+        print(f"{label}: {value}")
+
 
 class StreamHandler(AssistantEventHandler):
     @override
@@ -711,7 +766,7 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
         # DeepSeekやPhi向けのInference API
         # https://learn.microsoft.com/en-us/rest/api/aifoundry/modelinference/
         messages = conversation.get_completion_messages(model, text_only=True)
-        print(messages)
+        debug_print("messages", messages)
         try:
             if model["streaming"] and streaming_enabled:
                 response = client.complete({
@@ -725,12 +780,12 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
                     "model": model["model"],
                     "max_tokens": 4096
                 })
-                print(response)
+                debug_print("response", response)
                 digester = completion_streaming_digester(response)
                 full_response = st.write_stream(digester.generator)
                 response = digester.response
                 response_message = ChatCompletionMessage.model_validate(response["choices"][0])
-                print(response)
+                debug_print("response", response)
                 full_response = response_message.content
             else:
                 response = client.complete({
@@ -762,14 +817,14 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
             # ストリーミング対応のAssistant API実行
             args["event_handler"] = StreamHandler(client)
             try:
-                print(args)
+                debug_print("args", args)
                 with client.beta.threads.runs.stream(**args) as stream:
                     st.write_stream(stream.text_deltas)
                     stream.until_done()
 
                 run = stream.final_run or stream.current_run
                 content = stream.content
-                print(content)
+                debug_print("content", content)
                 print(run)
                 file_search_results = get_file_search_results(thread_id, run.id)
                 put_quotations(content, file_search_results)
@@ -815,7 +870,7 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
                     thread_id=thread.thread_id,
                     limit=1
                 )
-                print(messages)
+                debug_print("messages", messages)
                 content = messages.data[0].content
                 pretty_print_message("assist_msg", messages.data[0])
                 token_usage = get_token_usage(run, model)
@@ -847,6 +902,14 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
 
             if model["support_tools"] and selected_tools:
                 args["tools"] = prepare_tools_for_response_api(selected_tools, file_ids_for_code_interpreter)
+                if any(t.get("type") == "image_generation" for t in args["tools"] if isinstance(t, dict)):
+                    debug_print(
+                        "image_generation_config",
+                        {
+                            "tool_model": IMAGE_GENERATION_MODEL,
+                            "deployment_header": IMAGE_GENERATION_DEPLOYMENT,
+                        },
+                    )
 
             contents = []
             annotation_metadata = []
@@ -855,7 +918,7 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
             previous_not_found_retry_count = 0
             previous_not_found_retry_max = 3
             while True:
-                print(f"args: {args}")
+                debug_print("args", args)
 
                 try:
                     if model["streaming"] and streaming_enabled:
@@ -918,14 +981,14 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
                         ]
                         # ユーザー入力の前に、その前の1ターン分のやり取りを挿入
                         args["input"] = prev_in_and_out + args["input"]
-                        print(args["input"])
+                        debug_print("args[input]", args["input"])
                         # previous_response_idには前の前のidをセットする
                         args["previous_response_id"] = prev_response.previous_response_id
                         continue
 
                     raise
 
-                print(response)
+                debug_print("response", response)
                 previous_not_found_retry_count = 0
 
                 eblocks, emetadata = convert_parsed_response_to_assistant_messages(response.output)
@@ -978,16 +1041,16 @@ def execute_api(model, selected_tools, conversation, streaming_enabled, options 
             full_response = ""
             tool_call_count = 0
             while True:
-                print(f"args: {args}")
+                debug_print("args", args)
                 response = client.chat.completions.create(**args)
-                print(response)
+                debug_print("response", response)
 
                 if model["streaming"] and streaming_enabled:
                     # ストリーミング対応のCompletion API実行
                     digester = completion_streaming_digester(response)
                     full_response += st.write_stream(digester.generator)
                     response = digester.response
-                    print(response)
+                    debug_print("response", response)
                     response_message = ChatCompletionMessage.model_validate(response["choices"][0])
 
                 else:
@@ -1232,7 +1295,7 @@ if "clients" not in st.session_state:
             azure_endpoint = os.getenv("ENDPOINT_URL"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             api_version="2025-04-01-preview",
-            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-2"},
+            default_headers={"x-ms-oai-image-generation-deployment": IMAGE_GENERATION_DEPLOYMENT},
             timeout=httpx.Timeout(1200.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         # v1 preview
@@ -1241,7 +1304,7 @@ if "clients" not in st.session_state:
             base_url = os.getenv("ENDPOINT_URL").rstrip("/") + "/openai/v1/",
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             default_query={"api-version": "preview"},
-            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-2"},
+            default_headers={"x-ms-oai-image-generation-deployment": IMAGE_GENERATION_DEPLOYMENT},
             timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         "services_openaiv1": OpenAI(
